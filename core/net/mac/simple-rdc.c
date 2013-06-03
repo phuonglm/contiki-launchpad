@@ -705,7 +705,69 @@ after_on_check(void)
   return 0;
 }
 /*---------------------------------------------------------------------------*/
-static struct etimer powercycle_timer;
+static struct pt powercycle_pt;
+static int powercycle(struct ctimer *c);
+static struct ctimer powercycle_ctimer;
+/*---------------------------------------------------------------------------*/
+static void call_powercycle(void *ptr)
+{
+  powercycle((struct ctimer *)ptr);
+}
+/*---------------------------------------------------------------------------*/
+static void
+schedule_powercycle(clock_time_t time)
+{
+  static clock_time_t last_time = -1;
+
+  if(!ctimer_expired(&powercycle_ctimer)) {
+    return;
+  }
+  ctimer_reset(&powercycle_ctimer);
+
+#if 0
+#define CTIMER_SCHEDULE_GUARD_TICKS 1
+  if(last_time == time
+      && CLOCK_LT(
+          powercycle_ctimer.etimer.timer.start + 
+          powercycle_ctimer.etimer.timer.interval + last_time,
+          clock_time() + CTIMER_SCHEDULE_GUARD_TICKS)) {
+    /* Do not schedule ourselves too closely - skip one wakeup */
+    ctimer_set(&powercycle_ctimer, 2 * last_time, call_powercycle,
+               &powercycle_ctimer);
+    last_time = -1;
+  } else if(last_time == time) {
+    /* Using ctimer_reset() to avoid clock drifts */
+  } else {
+    last_time = time;
+    ctimer_set(&powercycle_ctimer, last_time, call_powercycle,
+               &powercycle_ctimer);
+  }
+#endif  /* if 0; commented out code */
+}
+/*---------------------------------------------------------------------------*/
+static int
+powercycle(struct ctimer *c)
+{
+  PT_BEGIN(&powercycle_pt);
+  while(1) {
+    schedule_powercycle(SIMPLERDC_PERIOD);
+    on();
+    BUSYWAIT_UNTIL(NETSTACK_RADIO.pending_packet(), SIMPLERDC_BWU_ON);
+    if(NETSTACK_RADIO.receiving_packet()) {
+      BUSYWAIT_UNTIL(NETSTACK_RADIO.receiving_packet() == 0, SIMPLERDC_POWERCYCLE_RX_TIMEOUT);
+    }
+    off();
+    if(cc2500_radio_ok() == 0) {
+      cc2500_reset();
+      off();
+    }
+    PT_YIELD_UNTIL(&powercycle_pt, ctimer_expired(&powercycle_ctimer));
+  }
+
+  PT_END(&powercycle_pt);
+}
+/*---------------------------------------------------------------------------*/
+#if NOPE
 PROCESS(simplerdc_process, "SimpleRDC process");
 PROCESS_THREAD(simplerdc_process, ev, data)
 {
@@ -755,8 +817,10 @@ PROCESS_THREAD(simplerdc_process, ev, data)
   }
   PROCESS_END();
 }
+#endif  /* if 0; commented out code */
 
 /*---------------------------------------------------------------------------*/
+static int turn_on(void);
 
 static void
 init(void)
@@ -765,8 +829,9 @@ init(void)
 
   tx_serial = random_rand();
 
-  process_start(&simplerdc_process, NULL);
+  // process_start(&simplerdc_process, NULL);
   simplerdc_is_on = 1;
+  turn_on();
 }
 /*---------------------------------------------------------------------------*/
 static int
@@ -775,6 +840,7 @@ turn_on(void)
   if(simplerdc_is_on == 0) {
     simplerdc_is_on = 1;
     simplerdc_keep_radio_on = 0;
+    schedule_powercycle(SIMPLERDC_PERIOD);
   }
   return 1;
 }
